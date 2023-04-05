@@ -1,0 +1,654 @@
+---
+title: "PSTAT-131-Final-Project"
+author: "Tufei Cai"
+date: "2022-11-30"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Importing Packages
+
+```{r,warning=FALSE,results='hide',message=FALSE}
+library(readr)
+library(dplyr)
+library(tidyverse)
+library(ROCR)
+library(ggplot2)
+library(ggridges)
+library(plotly)
+library(ggbreak)
+library(maps)
+library(mapdata)
+library(ggmap)
+library(gapminder)
+library(kableExtra)
+library(dendextend)
+library(tree)
+library(maptree)
+library(glmnet)
+library(randomForest)
+library(gbm)
+library(neuralnet)
+```
+
+```{css, echo=FALSE}
+.scrollbar{
+  white-space: pre-wrap;
+  max-width:100%;
+  overflow-x:auto;
+}
+```
+
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE}
+## read data and convert candidate names and party names from string to factor
+## we manually remove the variable "won", the indicator of county level winner
+## In Problem 5 we will reproduce this variable!
+election.raw <- read_csv("candidates_county.csv", col_names = TRUE) %>% 
+  mutate(candidate = as.factor(candidate), party = as.factor(party), won = NULL)
+
+## remove the word "County" from the county names
+words.to.remove = c("County")
+remove.words <- function(str, words.to.remove){
+  sapply(str, function(str){
+    x <- unlist(strsplit(str, " "))
+    x <- x[!x %in% words.to.remove]
+    return(paste(x, collapse = " "))
+  }, simplify = "array", USE.NAMES = FALSE)
+}
+election.raw$county <- remove.words(election.raw$county, words.to.remove)
+
+## read census data
+census <- read_csv("census_county.csv")
+```
+
+# Data Presenting
+```{r, echo=FALSE}
+kable(head(election.raw,5),"html", caption = "Election Dataset") %>% kable_styling("striped") %>% scroll_box(width = "100%")
+
+kable(head(census,5),"html", caption = "Census Dataset") %>% kable_styling("striped") %>% scroll_box(width = "100%")
+```
+### Election Data
+
+- The dimension of the election data is 32177 x 5
+- There is no missing value in the election data set
+- There are 51 unique value in the state (51 States)
+
+```{r, echo=FALSE, eval=FALSE}
+# Report the dimension of the election.raw
+dim(election.raw)
+
+# Check missing values
+election.missing <- is.na(election.raw)
+if (TRUE %in% election.missing){
+  print("There is missing value in the election data set")} else {
+    print("There is no missing value in the election data set")}
+
+
+# Compute total number of distinct values
+length(unique(election.raw$state))
+```
+
+### Census Data:
+
+- The dimension of census data is 3220 x 37
+- There is missing value in the census data set
+- There are 1955 unique value in the County column in census data set
+- There are 2825 unique value in the County column in election data set
+
+```{r, echo=FALSE, eval=FALSE}
+# Report the dimension of census
+dim(census)
+
+# missing values
+census.missing <- is.na(census)
+if (TRUE %in% census.missing){
+  print("There is missing value in the census data set")} else {
+    print("There is no missing value in the census data set")}
+
+# distinct values in county in census
+length(unique(census$County))
+
+# distinct values in county in election.raw
+length(unique(election.raw$county))
+```
+
+The data set election.raw has more county than the data set census.
+
+# Data Wrangling
+
+
+```{r, echo=FALSE}
+# Create a state-level summary into a election.state
+
+election.state <- election.raw %>% group_by(state) %>% summarise(TOTAL = sum(total_votes))
+
+
+election.total <- election.raw %>% group_by(candidate) %>% summarise(TOTAL = sum(total_votes))
+
+election.county <- election.raw$county # keep the same
+
+kable(head(election.total,5),"html", caption = "Total votes for each candidate") %>% kable_styling("striped") %>% scroll_box(width = "100%")
+```
+
+### Data wrangling with candidates
+
+```{r,echo=FALSE}
+named.presidential.candidates <- length(unique(election.raw$candidate))
+paste("There are total",named.presidential.candidates, "named presidential candidates in the 2020 election")
+
+total.votes.2020 <- election.raw %>% group_by(candidate) %>% summarise(total_votes = sum(total_votes))
+
+bar1 <- ggplot(total.votes.2020, aes(x = candidate, y = total_votes)) + geom_bar(stat = 'identity', fill = 'chartreuse3') + coord_flip() +
+  ylab("Total Votes") + xlab("Candidates") + geom_text(aes(x = candidate, y = total_votes - 10, label = total_votes), size = 2.8)
+ #+ theme(axis.title.x = element_blank())
+bar2 <- bar1 + scale_y_log10()
+print(bar2)
+```
+### State winner and County winner
+
+```{r, warning=FALSE, echo=FALSE, message=FALSE}
+# County winner 
+county.votes <- election.raw %>% group_by(county) %>% summarise(total = sum(total_votes))
+county.votes.2 <- merge(election.raw, county.votes, by = 'county',all.x = T)
+county.votes.2 <- county.votes.2 %>% mutate(pct = total_votes/total)
+#county.votes.2$pct <- format(round(county.votes.2$pct,6))
+#county.votes.2 <- dplyr::mutate(county.votes.2,pct = as.numeric(pct))
+
+# Find the winner
+county.winner <- county.votes.2 %>% group_by(county) %>% top_n(1, wt = pct) #%>% select(county, candidate)
+
+kable(head(county.winner,5),"html", caption = "County Winner") %>% kable_styling("striped") %>% scroll_box(width = "100%")
+
+# State winner
+state.votes <- election.raw %>% group_by(state) %>% summarise(total = sum(total_votes))
+state.votes_total.candidate <- election.raw %>% group_by(state, candidate) %>% summarise(total = sum(total_votes))
+state.votes.2 <- state.votes
+colnames(state.votes_total.candidate)[3] <- "Total_Votes"
+state.votes.2 <- merge(state.votes, state.votes_total.candidate)
+#state.votes.2 <- merge(election.raw, state.votes, by = 'state', all.x = T)
+state.votes.2 <- state.votes.2 %>% mutate(pct = Total_Votes/total)
+#state.votes.2$pct <- format(round(state.votes.2$pct,4))
+#state.votes.2 <- dplyr::mutate(state.votes.2,pct = as.numeric(pct))
+
+# Find the winner
+state.winner <- state.votes.2 %>% group_by(state) %>% top_n(1, wt = pct) %>% select(state, candidate)
+kable(head(state.winner,5),"html", caption = "State Winner") %>% kable_styling("striped") %>% scroll_box(width = "100%")
+#state.winner <- state.votes.2 %>% group_by(state) %>% slice(which.max(pct))
+```
+
+# Visualization
+
+
+```{r, warning=FALSE, echo=FALSE}
+# map graph for county
+counties <- map_data("county")
+ggplot(data = counties) + geom_polygon(aes(x = long, y = lat, fill = subregion, group = group), color = "white") +
+  coord_fixed(1.3) + guides(fill = F) + ggtitle("USA Map Seperated by County")
+```
+
+
+```{r, echo=FALSE}
+states <- map_data("state")
+colnames(states)[5] <- "state"
+colnames(state.winner)[1] <- "state"
+state.winner <- state.winner %>% mutate(candidate = factor(candidate)) %>% mutate(state = tolower(state))
+new_states <- left_join(states, state.winner, by = "state")
+
+ggplot(data = new_states) + 
+  geom_polygon(aes(x = long, y = lat, fill = candidate, group = group),
+               color = "white", show.legend = T) + coord_fixed(1.3) + guides(fill = F) + ggtitle("Joe Biden vs Donald Trump USA Map(State)")
+```
+
+
+
+```{r, echo=FALSE}
+colnames(counties)[6] <- "county"
+county.winner  <- county.winner %>% mutate(candidate = as.character(candidate)) %>% mutate(county = tolower(county))
+new_county <- left_join(counties, county.winner, by = "county")
+new_county <- new_county %>% filter(region == 'california')
+
+ggplot(data = new_county) + geom_polygon(aes(x = long, y = lat, fill = candidate, group = group), color = "white") +
+  coord_fixed(1.3) + guides(fill = F) + ggtitle("California Map with Joe Biden vs Donald Trump")
+```
+
+
+
+```{r, echo=FALSE, echo=FALSE}
+# plot for census
+census.ca <- census %>% filter(State == 'California')
+bar3 <- ggplot(census.ca, aes(x = County, y = TotalPop)) + geom_bar(stat = 'identity', fill = 'cornflowerblue') + coord_flip() +
+  ylab("County") + xlab("Total Population") + geom_text(aes(x = County, y = TotalPop + 30, label = TotalPop), size = 2)
+
+print(bar3 + scale_y_log10() + theme(text = element_text(size = 7)) + ggtitle("Total Population For California"))
+
+male <- census %>% group_by(State) %>% summarise(Total_Male = sum(Men))
+female <- census %>% group_by(State) %>% summarise(Total_Female = sum(Women))
+male.female <- left_join(male,female, by = 'State')
+
+plot4 <- ggplot(male.female, aes(x = Total_Male, y = Total_Female, color = State)) +
+  geom_point() + theme_bw() + scale_y_log10() + scale_x_log10() + xlab("Total Amount of Male") + ylab("Total Amount of Female") +
+  ggtitle("Total Amount of Female vs Total Amount of Male")
+
+ggplotly(plot4)
+```
+
+### Data manipulation for census data set
+
+```{r, echo=FALSE, echo=FALSE}
+# census.clean data
+percent <- function(x, digits = 8, format = "f", ...) {
+  paste0(formatC(x * 100, format = format, digits = digits, ...), "%")
+}
+
+census.clean <- census %>% filter(complete.cases(census)) %>% mutate(Men = percent(Men / TotalPop)) %>%
+  mutate(Employed = percent(Employed / TotalPop)) %>% mutate(VotingAgeCitizen = percent(VotingAgeCitizen / TotalPop))
+
+census.race <- census.clean %>% select(Hispanic, Black, Native, Asian, Pacific)
+census.race$Minority <- names(census.race)[apply(census.race, MARGIN = 1, FUN = which.min)]
+census.clean <- cbind(census.clean, Minority = census.race$Minority)
+census.clean <- census.clean %>% select(-Hispanic, -Black, -Native, -Asian, -Pacific) %>% 
+  select(-IncomeErr, -IncomePerCap, -IncomePerCapErr, -Walk, -PublicWork, -Construction)
+
+#census.clean$Men <- as.numeric(factor(census.clean$Men))
+#census.clean$VotingAgeCitizen <- as.numeric(factor(census.clean$VotingAgeCitizen))
+#census.clean$Employed <- as.numeric(factor(census.clean$Employed))
+```
+
+```{r, echo=FALSE}
+kable(head(census.clean,5),"html", caption = "Census.clean Dataset") %>% kable_styling("striped") %>% scroll_box(width = "100%")
+```
+
+# Dimensionality Reduction
+
+
+```{r, echo=FALSE}
+# Remove all character data and covert percentage to numbers
+#census.complete <- census %>% filter(complete.cases(census))
+pca_data <- census.clean %>% select(-County, -State, -CountyId, -Minority)
+pca_data$Men <- as.numeric(factor(pca_data$Men))
+pca_data$VotingAgeCitizen <- as.numeric(factor(pca_data$VotingAgeCitizen))
+pca_data$Employed <- as.numeric(factor(pca_data$Employed))
+
+# Running PCA
+pr.out <- prcomp(pca_data, scale. = T, center = T)
+pc.county <- pr.out$x[,1-2]
+```
+
+**In order to have a better result, I choose center and scale the features before running the PCA. I removed 'Minority' which is a character data type column, also covert 'Men', 'VotingAgeCitizen', 'Employed' from percentage to numbers so we could get better results.**
+
+```{r,echo=FALSE}
+pr.out.rot <- pr.out$rotation[,1]
+head(sort(abs(pr.out.rot), decreasing = T), 3)
+```
+
+**The three features with the largest absolute values of the first principle component are ChildPoverty, Poverty, Employed.**
+
+
+```{r,echo=FALSE}
+head(sort(abs(pr.out.rot), decreasing = F), 3)
+```
+
+
+**The opposite signs are otherTransp, PrivateWork, VotingAgeCitizen. And it means that these three variables are not straight related with the data. In other words they only had light correlation with the target.**
+
+### Proportion of Variance Explained and Cumulative Proportion of Variance Explained
+
+```{r, echo=FALSE}
+# plot PVE and cumulative PVE
+pr.var <- pr.out$sdev ^ 2
+
+# pve
+pve <- pr.var / sum(pr.var)
+plot(pve, xlab = 'Principle Component', ylab = "Proportion of Variance Explained", type = 'b')
+
+# cumulative pve
+plot(cumsum(pve), xlab = "Principle Component", ylab = "Cumulative Proportion of Variance Explained", type = 'b')
+```
+
+**We need around 10 PCs to capture 90% of the variance for the analysis**
+
+# Clustering
+
+Applying clustering method to the data set
+
+```{r, echo=FALSE}
+# Clustering
+set.seed(123)
+cluster.data <- scale(pca_data, center = T, scale = T)
+cluster.dist <- dist(cluster.data)
+
+census.hclust <- hclust(cluster.dist)
+clus.10 <- cutree(census.hclust, 10)
+table(clus.10)
+```
+
+```{r, echo=FALSE}
+cluster.dist.2 <- dist(pc.county)
+census.hclust.2 <- hclust(cluster.dist.2)
+clus.10_pc_First_Twp <- cutree(census.hclust.2, 10)
+table(clus.10_pc_First_Twp)
+```
+
+The first 2 component clustering seems better because it has less small classes of the clustering. First 2 component clustering seems more appropriate to Santa Barara County because it puts with multiple other California counties
+
+# Classification
+
+
+
+```{r, echo=FALSE}
+#county.winner <- county.votes.2 %>% group_by(county) %>% top_n(1, wt = pct)
+#state.winner <- state.votes.2 %>% group_by(state) %>% top_n(1, wt = pct)
+
+#census.clean$Men <- census.complete$Men
+#census.clean$VotingAgeCitizen <- census.complete$VotingAgeCitizen
+#census.clean$Employed <- census.complete$Employed
+county.winner <- county.votes.2 %>% group_by(county) %>% top_n(1, wt = pct) #%>% select(county, candidate)
+
+# we move all state and county names into lower-case
+tmpwinner <- county.winner %>% ungroup %>%
+  mutate_at(vars(state, county), tolower)
+
+# we move all state and county names into lower-case
+# we further remove suffixes of "county" and "parish"
+tmpcensus <- census.clean %>% mutate_at(vars(State, County), tolower) %>%
+  mutate(County = gsub(" county|  parish", "", County)) 
+
+# we join the two data sets
+election.cl <- tmpwinner %>%
+  left_join(tmpcensus, by = c("state"="State", "county"="County")) %>% 
+  na.omit
+
+# drop levels of county winners if you haven't done so in previous parts
+election.cl$candidate <- droplevels(election.cl$candidate)
+
+## save meta information
+election.meta <- election.cl %>% select(c(county, party, CountyId, state, total_votes, pct, total))
+
+## save predictors and class labels
+election.cl = election.cl %>% select(-c(county, party, CountyId, state, total_votes, pct, total))
+
+election.cl$Men <- as.numeric(factor(election.cl$Men))
+election.cl$VotingAgeCitizen <- as.numeric(factor(election.cl$VotingAgeCitizen))
+election.cl$Employed <- as.numeric(factor(election.cl$Employed))
+```
+
+**The reason why we need to exclude the predictor 'party' from election.c1 is because party is a character data type columns, further more we are predicting who has won the county/state which means we are looking for census and population's data to predict who will they vote for. And party is describing the candidate which is not our aim.**
+
+
+```{r, echo=FALSE}
+# training and testing data set
+set.seed(10) 
+n <- nrow(election.cl)
+idx.tr <- sample.int(n, 0.8*n) 
+election.tr <- election.cl[idx.tr, ]
+election.te <- election.cl[-idx.tr, ]
+
+# 10-Cross-Validation
+set.seed(20) 
+nfold <- 10
+folds <- sample(cut(1:nrow(election.tr), breaks=nfold, labels=FALSE))
+
+# Error Rate Function 
+calc_error_rate = function(predicted.value, true.value){
+  return(mean(true.value!=predicted.value))
+}
+
+#object records is used to record the classification performance of each method in the subsequent problems.
+records = matrix(NA, nrow=3, ncol=2)
+colnames(records) = c("train.error","test.error")
+rownames(records) = c("tree","logistic","lasso")
+```
+
+### Decision Tree Methods:
+
+```{r decision_tree, echo=FALSE, warning=FALSE, message=FALSE}
+# decision tree
+set.seed(1)
+
+tree.model <- tree(candidate ~., data = election.tr)
+draw.tree(tree.model, nodeinfo = T, cex = 0.5) # Plot
+
+# CV
+tree.cv <- cv.tree(tree.model,  FUN = prune.misclass, K = folds)
+best.cv.tree <- min(tree.cv$size[tree.cv$dev == min(tree.cv$dev)])
+tree.model.cv <- prune.misclass(tree.model, best = best.cv.tree)
+draw.tree(tree.model.cv, nodeinfo = T, cex = 0.5)
+x <- paste("Pruned tree of size", best.cv.tree)
+title(x)
+
+# Training error and test error
+tree.predict.train <- predict(tree.model, election.tr, type = 'class')
+tr.train.error <- calc_error_rate(tree.predict.train, election.tr$candidate)
+
+tree.predict.test <- predict(tree.model, election.te, type = 'class')
+tr.test.error <- calc_error_rate(tree.predict.test, election.te$candidate)
+
+# Add it to records data
+records[1,1] <- tr.train.error
+records[1,2] <- tr.test.error
+
+# Display record
+kable(records,"html", caption = "Records Dataset") %>% kable_styling("striped") %>% scroll_box(width = "100%")
+```
+
+**The test error rate is high which means the model might be over fitting and decision tree is not the best algorithm during this situation**
+
+**According to the graph, we see that decision tree first had separate transit and second it would depend on if the citizen is white or not. Further more it would depend on self-employed or professional and total population or production.**
+
+### Logisitc Regression Methods:
+
+```{r, echo=FALSE}
+# logistic regression
+set.seed(123)
+
+glm_model <- glm(candidate ~., data = election.tr, family = binomial)
+
+election.tr.glm.predict <- election.tr
+#election.tr.glm.predict$pred <- ifelse(election.tr.glm.predict$candidate == "Donald Trump", 1, 0)
+glm_predict_tr <- predict(glm_model, newdata = election.tr.glm.predict, type = 'response')
+election.tr.glm.predict<- election.tr.glm.predict %>% mutate(predict.glm = ifelse(glm_predict_tr <= 0.5, 'Donald Trump', 'Joe Biden'))
+glm.tr.error <- calc_error_rate(election.tr.glm.predict$predict.glm, election.tr.glm.predict$candidate)
+
+election.te.glm.predict <- election.te
+#election.te.glm.predict$pred <- ifelse(election.te.glm.predict$candidate == "Donald Trump", 1, 0)
+glm_predict_te <- predict(glm_model, newdata = election.te.glm.predict, type = 'response')
+election.te.glm.predict <- election.te.glm.predict %>% mutate(predict.glm = ifelse(glm_predict_te <= 0.5, 'Donald Trump', 'Joe Biden'))
+glm.te.error <- calc_error_rate(election.te.glm.predict$predict.glm, election.te.glm.predict$candidate)
+
+summary(glm_model)
+round(glm_model$coefficients, 6)
+records[2,1] <- glm.tr.error
+records[2,2] <- glm.te.error
+kable(records,"html", caption = "Records Dataset") %>% kable_styling("striped") %>% scroll_box(width = "100%")
+```
+
+**The significant variable became professional and it is different than the decision tree model. The coefficient for Professional is around 0.39 which means it is affecting the decision at most in all of the variables.**
+
+
+
+### Lasso Regression:
+
+```{r, echo=FALSE}
+# idx.tr
+dat <- model.matrix(candidate ~ .-Minority, data = election.cl)
+x.train <- dat[idx.tr,]
+y.train <- election.tr$candidate
+
+x.test <- dat[-idx.tr,]
+y.test <- election.te$candidate
+
+lambda = seq(1, 50) * 1e-4
+
+cv.model.lasso <- cv.glmnet(x.train, y.train, alpha = 1, nfolds = 10, lambda = lambda, family = 'binomial')
+
+plot(cv.model.lasso)
+abline(v = log(cv.model.lasso$lambda.min), col = 'blue', lwd = 3, lty = 2)
+
+best_lambda <- cv.model.lasso$lambda.min
+best.model <- glmnet(x.train, y.train, alpha = 0, lambda = best_lambda, family = 'binomial', standardize = T)
+
+# 0.0023 is the best lambda during this situation
+
+# coeffiecients
+round(coef(best.model), 6)
+# Non-zeros are white, transit, unemployment.
+# Compare to unpenalized logistic regression, lasso regression has enhanced the key coefficients.
+
+xx <- predict(cv.model.lasso, s = best_lambda, newx = as.matrix(election.tr), type = 'coefficients')
+```
+
+The optimal value for $\lambda$ is 0.0013. Non-zeros are white, transit, unemployment.Compare to unpenalized logistic regression, lasso regression has enhanced the key coefficients.
+
+###  ROC Curves:
+
+
+```{r, eval=FALSE, echo=FALSE}
+# Question 19
+# ROC for decision tree
+election.pred.tree <- predict(tree.model.cv, election.te, type = 'vector')
+x <- prediction(election.pred.tree[,2], election.te$candidate)
+perf <- performance(x, measure = 'tpr', x.measure = 'fpr')
+plot(perf, col = 2, lwd = 3, main = 'ROC curve for decision tree')
+abline(0,1)
+
+# ROC for logistic
+election.pred.glm <- data.frame(as.vector(predict(glm_model, election.te, type = 'response')))
+x2 <- prediction(election.pred.glm, election.te$candidate)
+perf2 <- performance(x2, measure = 'tpr', x.measure = 'fpr')
+plot(perf2, col = 2, lwd = 3, main = 'ROC curve for Logistic Regression')
+abline(0,1)
+```
+
+
+### Random Forest Methods:
+
+```{r, warning=TRUE, echo=FALSE}
+# Random Forest
+rf.model <- randomForest(candidate ~. -Minority, data = election.tr, mtry = 3, importance = T)
+rf.hat <- predict(rf.model, newdata = election.te)
+test.rf.err <- mean(rf.hat != election.te$candidate)
+paste("The test error rate is",test.rf.err)
+
+varImpPlot(rf.model, sort = T, main = 'Variable Importance for random forest model', n.var = 8)
+```
+
+### Boosting Methods:
+
+```{r, echo=FALSE}
+# Boosting
+
+boost.model <- gbm(ifelse(candidate == 'Joe Biden', 1, 0) ~ . -Minority, data = election.tr, distribution = "bernoulli", n.trees = 1000,
+                   interaction.depth = 2)
+summary(boost.model)
+
+```
+
+```{r, echo=FALSE}
+par(mfrow = c(1,2))
+plot(boost.model, i = "Employed", type = "response")
+plot(boost.model, i = "Unemployment", type = "response")
+
+yhat.boost <- predict(boost.model, newdata = election.te,
+                      n.trees = 500, type = 'response')
+yhat.boost = ifelse(yhat.boost > 0.5, 1, 0)
+
+test.boost.err <- mean(yhat.boost != ifelse(election.te$candidate == "Joe Biden", 1, 0))
+paste("The test error rate is", test.boost.err)
+```
+
+From the graph we can see the relation between emplyed and unedployment with the prediction
+
+**Random forest had better result than decision tree because random forest avoid the error(over fitting) caused by multiple tree classes.And boosting is having similar result as decision tree, logistic regression, and lasso regression. However, the top variable is different than decision tree, logistic regression, and lasso regression.**
+
+### Comparing linear regression(less flexible) and neural network classification(more flexible) in the election data.
+
+#### Linear Regression Methods:
+
+```{r, echo=FALSE}
+# linear classification:
+ct.win <- county.winner %>% select(county, candidate, total_votes) %>% mutate(county = tolower(county))
+lm.data <- tmpcensus
+lm.data <- lm.data %>% select(-CountyId, -Minority) %>% mutate(Men = as.numeric(factor(Men))) %>%
+  mutate(VotingAgeCitizen = as.numeric(factor(VotingAgeCitizen))) %>% mutate(Employed = as.numeric(factor(Employed)))
+colnames(lm.data)[2] <- 'county'
+colnames(lm.data)[1] <- 'state'
+lm.data <- merge(lm.data,ct.win, by = 'county')
+
+lm.data.tr <- lm.data[idx.tr,]
+lm.data.te <- lm.data[-idx.tr,]
+
+fit1 <- lm(total_votes ~ TotalPop + Men + Women + White + VotingAgeCitizen + Income + Poverty + ChildPoverty + Professional + Service
+           + Office + Production + Drive + Carpool + Transit + OtherTransp + WorkAtHome + MeanCommute + Employed + PrivateWork +
+             SelfEmployed + FamilyWork + Unemployment, data = lm.data.tr)
+summary(fit1)
+
+x <- (lm.data.te$total_votes - predict(fit1, newdata = lm.data.te))^2
+MSE <- mean(x)
+paste("The MSE is", MSE)
+```
+
+#### Neural Network Methods:
+
+```{r, echo=FALSE}
+# Neural Networks
+neu.model <- neuralnet(candidate ~ TotalPop + Men + Women + White + VotingAgeCitizen + Income + Poverty + ChildPoverty + Professional + Service
+           + Office + Production + Drive + Carpool + Transit + OtherTransp + WorkAtHome + MeanCommute + Employed + PrivateWork +
+             SelfEmployed + FamilyWork + Unemployment + total_votes, data = lm.data.tr, hidden = c(5,3), linear.output = F)
+
+nn.result <- compute(neu.model, lm.data.te)
+results <- data.frame(actual = lm.data.te$candidate, predict = nn.result$net.result)
+```
+
+```{r, echo=FALSE}
+plot(neu.model)
+```
+
+```{r, echo=FALSE}
+colnames(results)[2] <- 'Donald Trump'
+colnames(results)[3] <- 'Joe Biden'
+xx <- colnames(results[,2:3])[apply(results[,2:3], 1, which.max)]
+
+results$Prediction <- xx
+kable(head(results,5),"html", caption = "Neural Network Prediction") %>% kable_styling("striped") %>% scroll_box(width = "100%")
+paste("The test error rate is",calc_error_rate(results$Prediction, results$actual))
+```
+
+
+### Conclusion:
+
+```{r, echo=FALSE}
+
+final_records = matrix(NA, nrow=6, ncol=2)
+colnames(final_records) = c("train.error","test.error")
+rownames(final_records) = c("tree","logistic","lasso","random forest","boosting","neural network")
+
+final_records[1,1] <- tr.train.error
+final_records[1,2] <- tr.test.error
+
+final_records[2,1] <- glm.tr.error
+final_records[2,2] <- glm.te.error
+
+final_records[4,2] <- test.rf.err
+final_records[5,2] <- test.boost.err
+final_records[6,2] <- calc_error_rate(results$Prediction, results$actual)
+
+kable(final_records,"html", caption = "Final Records") %>% kable_styling("striped") %>% scroll_box(width = "100%")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
